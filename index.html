@@ -1,0 +1,1197 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>メロディーメーカー | 音楽制作ワークショップ教材</title>
+    <meta name="description" content="5音スケールとピアノロールで旋律をつくり、MP3として書き出せるブラウザ教材。">
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=&apos;http://www.w3.org/2000/svg&apos; viewBox=&apos;0 0 32 32&apos;%3E%3Ctext y=&apos;26&apos; font-size=&apos;26&apos;%3E%F0%9F%8E%B5%3C/text%3E%3C/svg%3E">
+
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+
+    <!-- React & ReactDOM -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+
+    <!-- Babel (JSX をブラウザで変換) -->
+    <script src="https://unpkg.com/@babel/standalone@7.23.10/babel.min.js"></script>
+
+    <!-- Tone.js (音声合成) -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/tone/14.8.49/Tone.js"></script>
+
+    <!-- Lucide (アイコン) -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+
+    <!-- lamejs (MP3 エンコード) -->
+    <script src="https://cdn.jsdelivr.net/npm/lamejs@1.2.1/lame.min.js"></script>
+
+    <!-- プリセット旋律（任意・削除しても動作します） -->
+    <script src="./presets.js"></script>
+
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Zen+Maru+Gothic:wght@400;700&display=swap');
+
+        body {
+            font-family: 'Zen Maru Gothic', sans-serif;
+            background-color: #f0f4f8;
+        }
+
+        .tab-content {
+            animation: fadeIn 0.3s ease-in-out;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef, useCallback } = React;
+
+        // プリセットは presets.js が読み込まれていれば有効になる（任意）
+        const scalePresets = window.MELODY_PRESETS || {};
+
+        // --- Scale Data for Melody Composition ---
+        const melodyScales = {
+            'scale1': {
+                name: 'レ ファ ソ ラ シ♭ ド（レ）',
+                example: '千本桜（黒うさP）',
+                notes: ['D', 'F', 'G', 'A', 'A#', 'C'],
+                flatDisplay: { 'A#': 'シ♭' },
+            },
+            'scale2': {
+                name: 'ド レ ミ ファ ソ',
+                example: '第９交響曲（Beethoven）/ Get Wild',
+                notes: ['C', 'D', 'E', 'F', 'G'],
+            },
+            'scale3': {
+                name: 'ソ ラ シ ド レ',
+                example: '夜の踊り子（サカナクション）',
+                notes: ['G', 'A', 'B', 'C', 'D'],
+            },
+            'scale4': {
+                name: 'レ♭ ミ♭ ミ ソ♭ ラ♭ シ♭ シ',
+                example: '打ち上げ花火（DAOKO×米津玄師）',
+                notes: ['C#', 'D#', 'F', 'F#', 'G#', 'A#', 'B'],
+                flatDisplay: { 'C#': 'レ♭', 'D#': 'ミ♭', 'F#': 'ソ♭', 'G#': 'ラ♭', 'A#': 'シ♭' },
+            }
+        };
+
+        const getScaleNotes = (scaleId) => {
+            const scale = melodyScales[scaleId];
+            return scale ? scale.notes : ['C', 'D', 'E', 'G', 'A'];
+        };
+
+        const noteToSolfege = {
+            'C': 'ド', 'C#': 'ド#', 'D': 'レ', 'D#': 'レ#', 'E': 'ミ',
+            'F': 'ファ', 'F#': 'ファ#', 'G': 'ソ', 'G#': 'ソ#', 'A': 'ラ',
+            'A#': 'ラ#', 'B': 'シ'
+        };
+
+        const getNoteSolfege = (noteName, scaleId) => {
+            const scale = melodyScales[scaleId];
+            if (scale && scale.flatDisplay && scale.flatDisplay[noteName]) {
+                return scale.flatDisplay[noteName];
+            }
+            return noteToSolfege[noteName] || noteName;
+        };
+
+        // Piano keyboard: always starts from C (1 octave: C4 to C5)
+        const chromaticNotes = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+        const blackNotesSet = new Set(['C#', 'D#', 'F#', 'G#', 'A#']);
+        const whiteKeyBindings = ['a', 's', 'd', 'f', 'g', 'h', 'j', 'k'];
+        const blackKeyBindings = ['w', 'e', 't', 'y', 'u'];
+
+        const generatePianoKeys = () => {
+            const keys = [];
+            let octave = 4;
+            let whiteIdx = 0, wCount = 0, bCount = 0;
+            for (let i = 0; i <= 12; i++) {
+                const noteIdx = i % 12;
+                const note = chromaticNotes[noteIdx];
+                if (i > 0 && noteIdx === 0) octave++;
+                if (blackNotesSet.has(note)) {
+                    keys.push({
+                        note, octave, type: 'black',
+                        key: bCount < blackKeyBindings.length ? blackKeyBindings[bCount] : null,
+                        afterWhite: whiteIdx - 1,
+                    });
+                    bCount++;
+                } else {
+                    keys.push({
+                        note, octave, type: 'white',
+                        key: wCount < whiteKeyBindings.length ? whiteKeyBindings[wCount] : null,
+                        whiteIndex: whiteIdx,
+                    });
+                    whiteIdx++;
+                    wCount++;
+                }
+            }
+            return keys;
+        };
+
+        // --- Melody Maker Component ---
+        const MelodyMaker = ({ selectedScale, setSelectedScale }) => {
+            const [pressedKeys, setPressedKeys] = useState(new Set());
+            const [isReady, setIsReady] = useState(false);
+            const synthRef = useRef(null);
+            const pressedRef = useRef(new Set());
+            const selectedScaleRef = useRef(selectedScale);
+
+            useEffect(() => {
+                selectedScaleRef.current = selectedScale;
+                if (synthRef.current) {
+                    synthRef.current.releaseAll();
+                    pressedRef.current.clear();
+                    setPressedKeys(new Set());
+                }
+            }, [selectedScale]);
+
+            const ensureAudio = async () => {
+                if (synthRef.current) return;
+                await Tone.start();
+                const synth = new Tone.PolySynth(Tone.Synth, {
+                    oscillator: { type: "triangle" },
+                    envelope: { attack: 0.005, decay: 0.3, sustain: 0.2, release: 0.8 }
+                });
+                const reverb = new Tone.Reverb({ decay: 1.5, wet: 0.2 }).toDestination();
+                synth.connect(reverb);
+                synth.volume.value = -8;
+                synthRef.current = synth;
+                setIsReady(true);
+            };
+
+            useEffect(() => {
+                const handleKeyDown = async (e) => {
+                    if (e.repeat) return;
+                    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+                    const key = e.key.toLowerCase();
+                    const keys = generatePianoKeys();
+                    const pk = keys.find(k => k.key === key);
+                    if (!pk) return;
+                    if (!getScaleNotes(selectedScaleRef.current).includes(pk.note)) return;
+                    if (pressedRef.current.has(key)) return;
+                    e.preventDefault();
+                    await ensureAudio();
+                    pressedRef.current.add(key);
+                    setPressedKeys(new Set(pressedRef.current));
+                    if (synthRef.current) synthRef.current.triggerAttack(`${pk.note}${pk.octave}`);
+                };
+                const handleKeyUp = (e) => {
+                    const key = e.key.toLowerCase();
+                    const keys = generatePianoKeys();
+                    const pk = keys.find(k => k.key === key);
+                    if (!pk) return;
+                    pressedRef.current.delete(key);
+                    setPressedKeys(new Set(pressedRef.current));
+                    if (synthRef.current) synthRef.current.triggerRelease(`${pk.note}${pk.octave}`);
+                };
+                window.addEventListener('keydown', handleKeyDown);
+                window.addEventListener('keyup', handleKeyUp);
+                return () => {
+                    window.removeEventListener('keydown', handleKeyDown);
+                    window.removeEventListener('keyup', handleKeyUp);
+                };
+            }, []);
+
+            useEffect(() => {
+                return () => {
+                    if (synthRef.current) {
+                        synthRef.current.releaseAll();
+                        synthRef.current.dispose();
+                        synthRef.current = null;
+                    }
+                };
+            }, []);
+
+            const handleMouseDown = async (pk) => {
+                if (!getScaleNotes(selectedScaleRef.current).includes(pk.note)) return;
+                await ensureAudio();
+                if (synthRef.current) synthRef.current.triggerAttack(`${pk.note}${pk.octave}`);
+                pressedRef.current.add(pk.key);
+                setPressedKeys(new Set(pressedRef.current));
+            };
+            const handleMouseUp = (pk) => {
+                if (synthRef.current) synthRef.current.triggerRelease(`${pk.note}${pk.octave}`);
+                pressedRef.current.delete(pk.key);
+                setPressedKeys(new Set(pressedRef.current));
+            };
+
+            const currentKeys = generatePianoKeys();
+            const whiteKeys = currentKeys.filter(k => k.type === 'white');
+            const blackKeys = currentKeys.filter(k => k.type === 'black');
+            const scaleNotes = getScaleNotes(selectedScale);
+
+            const WHITE_W = 56;
+            const WHITE_GAP = 2;
+            const BLACK_W = 36;
+            const WHITE_H = 164;
+            const BLACK_H = 100;
+            const getBlackKeyLeft = (afterIdx) => (afterIdx + 1) * (WHITE_W + WHITE_GAP) - BLACK_W / 2;
+            const totalWidth = whiteKeys.length * (WHITE_W + WHITE_GAP) - WHITE_GAP;
+
+            return (
+                <div className="max-w-3xl mx-auto tab-content">
+                    <div className="bg-white rounded-2xl shadow-lg border border-slate-100 overflow-hidden">
+                        <div className="bg-gradient-to-r from-emerald-600 to-teal-600 px-6 py-6 text-white">
+                            <h2 className="text-2xl font-bold flex items-center gap-2">
+                                <i data-lucide="music" className="w-6 h-6"></i> 旋律づくり
+                            </h2>
+                            <p className="text-emerald-100 mt-2 text-sm">
+                                音階を選んで、キーボードを押すとその音階の音だけが鳴ります。自由にメロディーをつくってみよう！
+                            </p>
+                        </div>
+
+                        <div className="p-6 md:p-8 space-y-6">
+                            {/* Scale selector */}
+                            <div>
+                                <label className="block text-sm font-bold text-slate-700 mb-2">
+                                    音階（スケール）を選ぶ
+                                </label>
+                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                                    {Object.entries(melodyScales).map(([id, scale]) => (
+                                        <button
+                                            key={id}
+                                            onClick={() => setSelectedScale(id)}
+                                            className={`p-3 rounded-xl text-left transition-all border-2 ${
+                                                selectedScale === id
+                                                    ? 'bg-emerald-600 text-white border-emerald-600 shadow-md'
+                                                    : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50 hover:border-emerald-300'
+                                            }`}
+                                        >
+                                            <div className="font-bold text-sm">{scale.name}</div>
+                                            <div className={`text-xs mt-0.5 ${selectedScale === id ? 'text-emerald-100' : 'text-slate-400'}`}>
+                                                例：{scale.example}
+                                            </div>
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
+
+                            {/* Scale info */}
+                            <div className="bg-emerald-50 rounded-xl p-4 border border-emerald-100">
+                                <p className="text-sm font-bold text-emerald-800 mb-2">
+                                    {melodyScales[selectedScale].name}（使える音）
+                                </p>
+                                <div className="flex gap-2 flex-wrap">
+                                    {scaleNotes.map((n, i) => (
+                                        <span key={i} className="inline-flex items-center gap-1 bg-white px-3 py-1.5 rounded-full text-sm font-bold text-emerald-700 border border-emerald-200 shadow-sm">
+                                            {getNoteSolfege(n, selectedScale)}
+                                        </span>
+                                    ))}
+                                </div>
+                            </div>
+
+                            {/* Piano keyboard */}
+                            <div>
+                                <p className="text-xs text-slate-500 mb-3 flex items-center gap-1">
+                                    <i data-lucide="keyboard" className="w-3 h-3"></i>
+                                    白鍵: A S D F G H J K ／ 黒鍵: W E T Y U ／ クリックでも弾けます
+                                </p>
+                                <div className="flex justify-center overflow-x-auto py-2">
+                                    <div className="relative select-none" style={{ width: totalWidth, height: WHITE_H, minWidth: totalWidth }}>
+                                        {/* White keys */}
+                                        {whiteKeys.map((pk, i) => {
+                                            const active = scaleNotes.includes(pk.note);
+                                            const pressed = pressedKeys.has(pk.key);
+                                            return (
+                                                <div
+                                                    key={`${pk.note}${pk.octave}`}
+                                                    onMouseDown={() => handleMouseDown(pk)}
+                                                    onMouseUp={() => handleMouseUp(pk)}
+                                                    onMouseLeave={() => { if (pressedKeys.has(pk.key)) handleMouseUp(pk); }}
+                                                    className={`absolute rounded-b-lg border-2 flex flex-col items-center justify-end pb-2 transition-colors
+                                                        ${!active
+                                                            ? 'bg-slate-100 border-slate-200 cursor-not-allowed opacity-40'
+                                                            : pressed
+                                                                ? 'bg-emerald-200 border-emerald-400 shadow-inner'
+                                                                : 'bg-white border-slate-200 hover:bg-emerald-50 cursor-pointer'
+                                                        }`}
+                                                    style={{ width: WHITE_W, height: WHITE_H, left: i * (WHITE_W + WHITE_GAP), top: 0 }}
+                                                >
+                                                    <span className={`text-xs font-bold leading-none ${active ? 'text-slate-500' : 'text-slate-300'}`}>
+                                                        {getNoteSolfege(pk.note, selectedScale)}
+                                                    </span>
+                                                    <span className={`text-sm font-bold leading-none mt-1 ${active ? 'text-slate-700' : 'text-slate-300'}`}>
+                                                        {pk.note}{pk.octave}
+                                                    </span>
+                                                    <span className={`text-[10px] mt-1.5 px-1.5 py-0.5 rounded font-mono font-bold
+                                                        ${active ? 'bg-slate-200 text-slate-600' : 'bg-slate-100 text-slate-300'}`}>
+                                                        {pk.key.toUpperCase()}
+                                                    </span>
+                                                </div>
+                                            );
+                                        })}
+                                        {/* Black keys */}
+                                        {blackKeys.map((pk) => {
+                                            const active = scaleNotes.includes(pk.note);
+                                            const pressed = pressedKeys.has(pk.key);
+                                            return (
+                                                <div
+                                                    key={`${pk.note}${pk.octave}`}
+                                                    onMouseDown={() => handleMouseDown(pk)}
+                                                    onMouseUp={() => handleMouseUp(pk)}
+                                                    onMouseLeave={() => { if (pressedKeys.has(pk.key)) handleMouseUp(pk); }}
+                                                    className={`absolute rounded-b-lg flex flex-col items-center justify-end pb-2 z-10 transition-colors border
+                                                        ${!active
+                                                            ? 'bg-slate-300 border-slate-300 cursor-not-allowed'
+                                                            : pressed
+                                                                ? 'bg-emerald-600 border-emerald-800 shadow-inner'
+                                                                : 'bg-slate-900 border-slate-900 hover:bg-slate-800 cursor-pointer'
+                                                        }`}
+                                                    style={{ width: BLACK_W, height: BLACK_H, left: getBlackKeyLeft(pk.afterWhite), top: 0 }}
+                                                >
+                                                    <span className={`text-[10px] font-bold leading-none ${active ? 'text-white/80' : 'text-slate-400'}`}>
+                                                        {getNoteSolfege(pk.note, selectedScale)}
+                                                    </span>
+                                                    <span className={`text-[10px] mt-1 px-1 py-0.5 rounded font-mono font-bold
+                                                        ${active ? 'bg-white/20 text-white/90' : 'bg-slate-200/50 text-slate-400'}`}>
+                                                        {pk.key ? pk.key.toUpperCase() : ''}
+                                                    </span>
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                </div>
+                            </div>
+
+                            {!isReady && (
+                                <div className="bg-yellow-50 border-l-4 border-yellow-400 p-4 rounded shadow-sm flex items-start gap-3">
+                                    <i data-lucide="volume-2" className="w-5 h-5 text-yellow-600 mt-0.5 flex-shrink-0"></i>
+                                    <p className="text-sm text-yellow-700">キーボードのキーを押すか、鍵盤をクリックすると音が鳴り始めます。</p>
+                                </div>
+                            )}
+
+                            {/* Tips */}
+                            <div className="bg-amber-50 p-4 rounded-xl text-sm text-amber-800 flex gap-3 items-start border border-amber-100">
+                                <i data-lucide="lightbulb" className="w-5 h-5 shrink-0 mt-0.5"></i>
+                                <div>
+                                    <strong>5音スケールとは？</strong><br/>
+                                    5つの音だけを使ったスケール（音階）です。どの順番で弾いても不協和音になりにくいので、自由にメロディーを作れます。<br/>
+                                    <span className="text-amber-600">グレーになっている鍵盤は、このスケールに含まれない音です。</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        // --- Melody Editor (Piano Roll) Component ---
+        const MelodyEditor = ({ selectedScale }) => {
+            const STEPS = 128; // 8小節 × 4拍 × 4（16分音符）
+            const NUM_BARS = 8;
+            const HEADER_H = 24;
+            const ROW_ACTIVE = 28;
+            const ROW_INACTIVE = 8;
+            const CELL_MIN = 18;
+
+            // C3〜C5（高い→低い）
+            const pitches = (() => {
+                const n = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+                const r = ['C5'];
+                for (let o = 4; o >= 3; o--)
+                    for (let i = n.length - 1; i >= 0; i--) r.push(`${n[i]}${o}`);
+                return r; // C5, B4, A#4 ... C#3, C3  (25 notes)
+            })();
+
+            // ドレミラベル（オクターブ付き）
+            const pitchLabel = (p) => {
+                const name = p.slice(0, -1);
+                const oct = p.slice(-1);
+                return `${getNoteSolfege(name, selectedScale)}${oct}`;
+            };
+
+            // 行の高さを事前計算（アクティブ行は大きく、非アクティブ行は小さく）
+            const scaleNotes = getScaleNotes(selectedScale);
+            const isPitchActive = (p) => scaleNotes.includes(p.slice(0, -1));
+
+            const rowHeights = pitches.map(p => isPitchActive(p) ? ROW_ACTIVE : ROW_INACTIVE);
+            const rowTops = (() => {
+                const tops = [0];
+                for (let i = 1; i < pitches.length; i++) tops.push(tops[i - 1] + rowHeights[i - 1]);
+                return tops;
+            })();
+
+            // セルサイズはコンテナ幅から動的に計算（最小幅あり）
+            const LABEL_W = 52;
+            const containerRef = useRef(null);
+            const [cellW, setCellW] = useState(0);
+            const cellWRef = useRef(0);
+            useEffect(() => { cellWRef.current = cellW; }, [cellW]);
+
+            useEffect(() => {
+                const measure = () => {
+                    if (containerRef.current) {
+                        const w = containerRef.current.clientWidth - LABEL_W - 2;
+                        setCellW(Math.max(CELL_MIN, Math.floor(w / STEPS)));
+                    }
+                };
+                measure();
+                window.addEventListener('resize', measure);
+                return () => window.removeEventListener('resize', measure);
+            }, []);
+
+            const STORAGE_AUTO = 'melody_autosave';
+            const STORAGE_SLOTS = 'melody_slots';
+
+            const loadSlots = () => {
+                try { return JSON.parse(localStorage.getItem(STORAGE_SLOTS)) || {}; }
+                catch { return {}; }
+            };
+
+            const idRef = useRef(1);
+
+            const [notes, setNotes] = useState(() => {
+                try {
+                    const saved = JSON.parse(localStorage.getItem(STORAGE_AUTO));
+                    if (saved && saved.notes?.length) {
+                        const maxId = saved.notes.reduce((m, n) => Math.max(m, n.id), 0);
+                        setTimeout(() => { idRef.current = maxId + 1; }, 0);
+                        return saved.notes;
+                    }
+                } catch {}
+                return [];
+            });
+            const [playing, setPlaying] = useState(false);
+            const [cursor, setCursor] = useState(-1);
+            const [drag, setDrag] = useState(null);
+            const [slots, setSlots] = useState(loadSlots);
+            const [savedFlash, setSavedFlash] = useState('');
+            const [repeat, setRepeat] = useState(false);
+            const [exporting, setExporting] = useState(false);
+
+            // --- Undo Stack ---
+            const [history, setHistory] = useState([]);
+            const historyRef = useRef([]);
+            useEffect(() => { historyRef.current = history; }, [history]);
+            const MAX_HISTORY = 50;
+
+            const pushHistory = useCallback((noteState) => {
+                setHistory(prev => [...prev.slice(-(MAX_HISTORY - 1)), noteState.map(n => ({...n}))]);
+            }, []);
+
+            const undo = useCallback(() => {
+                const hist = historyRef.current;
+                if (hist.length === 0) return;
+                const prevState = hist[hist.length - 1];
+                setHistory(prev => prev.slice(0, -1));
+                const maxId = prevState.length > 0 ? prevState.reduce((m, n) => Math.max(m, n.id), 0) + 1 : 1;
+                idRef.current = maxId;
+                setNotes(prevState);
+            }, []);
+
+            const repeatRef = useRef(false);
+            useEffect(() => { repeatRef.current = repeat; }, [repeat]);
+            const notesRef = useRef([]);
+            useEffect(() => { notesRef.current = notes; }, [notes]);
+            const synthRef = useRef(null);
+            const gridRef = useRef(null);
+            const playingRef = useRef(false);
+
+            const isBlackKey = (p) => p.includes('#');
+            const isCNote = (p) => /^C\d$/.test(p);
+
+            // 自動保存（ノート変更時）
+            useEffect(() => {
+                localStorage.setItem(STORAGE_AUTO, JSON.stringify({ notes, scale: selectedScale, ts: Date.now() }));
+            }, [notes]);
+
+            // Undo keyboard shortcut (Ctrl+Z / Cmd+Z)
+            useEffect(() => {
+                const handleKeyDown = (e) => {
+                    if ((e.ctrlKey || e.metaKey) && e.key === 'z') {
+                        e.preventDefault();
+                        undo();
+                    }
+                };
+                window.addEventListener('keydown', handleKeyDown);
+                return () => window.removeEventListener('keydown', handleKeyDown);
+            }, [undo]);
+
+            const saveToSlot = (slotId) => {
+                const updated = { ...slots, [slotId]: { notes: [...notes], scale: selectedScale, ts: Date.now() } };
+                setSlots(updated);
+                localStorage.setItem(STORAGE_SLOTS, JSON.stringify(updated));
+                setSavedFlash(slotId);
+                setTimeout(() => setSavedFlash(''), 1200);
+            };
+
+            const loadFromSlot = (slotId) => {
+                const slot = slots[slotId];
+                if (!slot) return;
+                if (notes.length > 0 && !confirm(`スロット${slotId}を読み込みます。現在の旋律は上書きされます。\n（元に戻す: Ctrl+Z / Cmd+Z）`)) return;
+                pushHistory(notes);
+                stopPlay();
+                const maxId = slot.notes.reduce((m, n) => Math.max(m, n.id), 0);
+                idRef.current = maxId + 1;
+                setNotes(slot.notes);
+            };
+
+            const deleteSlot = (slotId) => {
+                if (!confirm(`スロット${slotId}を削除しますか？`)) return;
+                const updated = { ...slots };
+                delete updated[slotId];
+                setSlots(updated);
+                localStorage.setItem(STORAGE_SLOTS, JSON.stringify(updated));
+            };
+
+            useEffect(() => { lucide.createIcons(); }, [playing, notes.length, savedFlash, repeat, exporting, history.length]);
+
+            const ensureSynth = async () => {
+                await Tone.start();
+                if (synthRef.current) return;
+                const s = new Tone.PolySynth(Tone.Synth, {
+                    oscillator: { type: 'triangle' },
+                    envelope: { attack: 0.005, decay: 0.3, sustain: 0.2, release: 0.8 }
+                });
+                const rev = new Tone.Reverb({ decay: 1.5, wet: 0.2 }).toDestination();
+                s.connect(rev);
+                s.volume.value = -8;
+                synthRef.current = s;
+            };
+
+            // Y座標 → 行インデックス
+            const yToRow = (y) => {
+                for (let i = 0; i < pitches.length; i++) {
+                    if (y >= rowTops[i] && y < rowTops[i] + rowHeights[i]) return i;
+                }
+                return -1;
+            };
+
+            // Click grid → add note (scale notes only) + play sound
+            const handleGridMouseDown = async (e) => {
+                if (drag) return;
+                const cw = cellWRef.current;
+                if (!cw) return;
+                const rect = gridRef.current.getBoundingClientRect();
+                const col = Math.floor((e.clientX - rect.left) / cw);
+                const row = yToRow(e.clientY - rect.top);
+                if (col < 0 || col >= STEPS || row < 0 || row >= pitches.length) return;
+                const pitch = pitches[row];
+                if (!isPitchActive(pitch)) return;
+                const hit = notes.find(n => n.pitch === pitch && col >= n.step && col < n.step + n.duration);
+                if (!hit) {
+                    pushHistory(notes);
+                    const noteId = idRef.current++;
+                    setNotes(prev => [...prev, { id: noteId, pitch, step: col, duration: 1 }]);
+                    await ensureSynth();
+                    if (synthRef.current) synthRef.current.triggerAttackRelease(pitch, '16n');
+                }
+            };
+
+            // Drag to resize note
+            useEffect(() => {
+                if (!drag) return;
+                const cw = cellWRef.current || 1;
+                const onMove = (e) => {
+                    const dx = e.clientX - drag.startX;
+                    const d = Math.round(dx / cw);
+                    const dur = Math.max(1, drag.origDur + d);
+                    setNotes(prev => prev.map(n =>
+                        n.id === drag.noteId ? { ...n, duration: Math.min(dur, STEPS - n.step) } : n
+                    ));
+                };
+                const onUp = () => {
+                    setDrag(null);
+                };
+                document.addEventListener('mousemove', onMove);
+                document.addEventListener('mouseup', onUp);
+                return () => {
+                    document.removeEventListener('mousemove', onMove);
+                    document.removeEventListener('mouseup', onUp);
+                };
+            }, [drag]);
+
+            // Playback (with repeat support)
+            const startPlay = async () => {
+                await ensureSynth();
+                Tone.Transport.cancel();
+                Tone.Transport.stop();
+                Tone.Transport.position = 0;
+                Tone.Transport.bpm.value = 120;
+                playingRef.current = true;
+
+                const scheduleLoop = (currentNotes) => {
+                    const t16 = Tone.Time('16n').toSeconds();
+
+                    for (let s = 0; s < STEPS; s++) {
+                        Tone.Transport.schedule(time => {
+                            Tone.Draw.schedule(() => setCursor(s), time);
+                        }, Tone.Transport.seconds + s * t16);
+                    }
+
+                    currentNotes.forEach(n => {
+                        Tone.Transport.schedule(time => {
+                            if (synthRef.current) synthRef.current.triggerAttackRelease(n.pitch, n.duration * t16, time);
+                        }, Tone.Transport.seconds + n.step * t16);
+                    });
+
+                    Tone.Transport.schedule(time => {
+                        Tone.Draw.schedule(() => {
+                            if (repeatRef.current && playingRef.current) {
+                                scheduleLoop(notesRef.current);
+                            } else {
+                                setPlaying(false);
+                                playingRef.current = false;
+                                setCursor(-1);
+                                Tone.Transport.stop();
+                            }
+                        }, time);
+                    }, Tone.Transport.seconds + STEPS * t16);
+                };
+
+                scheduleLoop(notes);
+                Tone.Transport.start();
+                setPlaying(true);
+            };
+
+            const stopPlay = () => {
+                playingRef.current = false;
+                Tone.Transport.stop();
+                Tone.Transport.cancel();
+                if (synthRef.current) synthRef.current.releaseAll();
+                setPlaying(false);
+                setCursor(-1);
+            };
+
+            const exportMp3 = async () => {
+                if (notes.length === 0 || exporting) return;
+                setExporting(true);
+                try {
+                    const bpm = 120;
+                    const t16 = 60 / bpm / 4; // 16分音符の秒数
+                    const duration = STEPS * t16 + 1; // 末尾にリリース分の余白
+
+                    const buffer = await Tone.Offline(({ transport }) => {
+                        const synth = new Tone.PolySynth(Tone.Synth, {
+                            oscillator: { type: 'triangle' },
+                            envelope: { attack: 0.005, decay: 0.3, sustain: 0.2, release: 0.8 }
+                        });
+                        const rev = new Tone.Reverb({ decay: 1.5, wet: 0.2 }).toDestination();
+                        synth.connect(rev);
+                        synth.volume.value = -8;
+
+                        transport.bpm.value = bpm;
+                        notes.forEach(n => {
+                            transport.schedule(time => {
+                                synth.triggerAttackRelease(n.pitch, n.duration * t16, time);
+                            }, n.step * t16);
+                        });
+                        transport.start(0);
+                    }, duration);
+
+                    // Float32 → Int16 変換
+                    const sampleRate = buffer.sampleRate;
+                    const channels = buffer.numberOfChannels;
+                    const length = buffer.length;
+                    const left = buffer.getChannelData(0);
+                    const right = channels > 1 ? buffer.getChannelData(1) : left;
+
+                    const mp3encoder = new lamejs.Mp3Encoder(2, sampleRate, 192);
+                    const blockSize = 1152;
+                    const mp3Data = [];
+
+                    const toInt16 = (float32) => {
+                        const int16 = new Int16Array(float32.length);
+                        for (let i = 0; i < float32.length; i++) {
+                            const s = Math.max(-1, Math.min(1, float32[i]));
+                            int16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+                        }
+                        return int16;
+                    };
+                    const leftInt = toInt16(left);
+                    const rightInt = toInt16(right);
+
+                    for (let i = 0; i < length; i += blockSize) {
+                        const leftChunk = leftInt.subarray(i, i + blockSize);
+                        const rightChunk = rightInt.subarray(i, i + blockSize);
+                        const buf = mp3encoder.encodeBuffer(leftChunk, rightChunk);
+                        if (buf.length > 0) mp3Data.push(buf);
+                    }
+                    const flush = mp3encoder.flush();
+                    if (flush.length > 0) mp3Data.push(flush);
+
+                    const blob = new Blob(mp3Data, { type: 'audio/mp3' });
+                    const filename = `melody_${new Date().toISOString().slice(0,19).replace(/[T:]/g, '-')}.mp3`;
+
+                    // Download locally
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = filename;
+                    document.body.appendChild(a);
+                    a.click();
+                    a.remove();
+                    URL.revokeObjectURL(url);
+                } catch (e) {
+                    console.error('MP3 export failed:', e);
+                    alert('MP3の書き出しに失敗しました');
+                } finally {
+                    setExporting(false);
+                }
+            };
+
+            // --- Improved Random Melody Generation ---
+            const generateMusicalMelody = () => {
+                const activePitches = pitches.filter(p => isPitchActive(p));
+                if (activePitches.length === 0) return [];
+
+                // Sort by pitch height (low → high for musical stepwise motion)
+                const sorted = [...activePitches].reverse();
+
+                const newNotes = [];
+                let id = idRef.current;
+
+                // Generate in 2-bar phrases (32 steps each)
+                const PHRASE_LEN = 32;
+                const numPhrases = STEPS / PHRASE_LEN;
+
+                for (let p = 0; p < numPhrases; p++) {
+                    const phraseStart = p * PHRASE_LEN;
+                    let step = phraseStart;
+                    const phraseEnd = phraseStart + PHRASE_LEN;
+
+                    // Start each phrase near the center of the pitch range
+                    let pitchIdx = Math.floor(sorted.length / 2) + Math.floor(Math.random() * 3) - 1;
+                    pitchIdx = Math.max(0, Math.min(sorted.length - 1, pitchIdx));
+
+                    while (step < phraseEnd) {
+                        // Rest probability (higher at sub-phrase boundaries)
+                        const beatPos = (step - phraseStart) % 16;
+                        const restProb = beatPos === 0 && step !== phraseStart ? 0.35 : beatPos % 8 === 0 ? 0.2 : 0.1;
+                        if (Math.random() < restProb) {
+                            step += [2, 4][Math.floor(Math.random() * 2)];
+                            continue;
+                        }
+
+                        // Pitch selection: prefer stepwise motion
+                        if (Math.random() < 0.6) {
+                            // Stepwise: adjacent scale tone
+                            const dir = Math.random() < 0.5 ? -1 : 1;
+                            pitchIdx = Math.max(0, Math.min(sorted.length - 1, pitchIdx + dir));
+                        } else if (Math.random() < 0.5) {
+                            // Small leap (2-3 degrees)
+                            const leap = (Math.floor(Math.random() * 2) + 2) * (Math.random() < 0.5 ? -1 : 1);
+                            pitchIdx = Math.max(0, Math.min(sorted.length - 1, pitchIdx + leap));
+                        }
+                        // else: repeat same note (good for rhythm emphasis)
+
+                        const pitch = sorted[pitchIdx];
+                        const remaining = phraseEnd - step;
+
+                        // Duration selection with musical weights
+                        const durs = [
+                            [2, 35], // 8th note (most common)
+                            [4, 28], // quarter note
+                            [1, 12], // 16th note (occasional quick note)
+                            [8, 12], // half note (for sustained moments)
+                            [6, 8],  // dotted quarter
+                            [3, 5],  // dotted 8th
+                        ].filter(([d]) => d <= remaining);
+
+                        const totalW = durs.reduce((s, [, w]) => s + w, 0);
+                        let r = Math.random() * totalW;
+                        let dur = durs[0][0];
+                        for (const [d, w] of durs) {
+                            r -= w;
+                            if (r <= 0) { dur = d; break; }
+                        }
+
+                        newNotes.push({ id: id++, pitch, step, duration: dur });
+                        step += dur;
+                    }
+                }
+
+                idRef.current = id;
+                return newNotes;
+            };
+
+            // --- Preset Loading ---
+            const loadPreset = (withConfirm = true) => {
+                const preset = scalePresets[selectedScale];
+                if (!preset) return;
+                if (withConfirm && notes.length > 0) {
+                    if (!confirm(`「${preset.title}」のプリセットを読み込みます。現在の旋律は上書きされます。\n（元に戻す: Ctrl+Z / Cmd+Z）`)) return;
+                }
+                pushHistory(notes);
+                stopPlay();
+                let id = idRef.current;
+                const presetNotes = preset.notes.map(n => ({ ...n, id: id++ }));
+                idRef.current = id;
+                setNotes(presetNotes);
+            };
+
+            // Auto-load preset when scale changes and editor is empty
+            const prevScaleRef = useRef(selectedScale);
+            useEffect(() => {
+                if (prevScaleRef.current !== selectedScale) {
+                    prevScaleRef.current = selectedScale;
+                    if (notes.length === 0 && scalePresets[selectedScale]) {
+                        let id = idRef.current;
+                        const presetNotes = scalePresets[selectedScale].notes.map(n => ({ ...n, id: id++ }));
+                        idRef.current = id;
+                        setNotes(presetNotes);
+                    }
+                }
+            }, [selectedScale]);
+
+            useEffect(() => () => {
+                Tone.Transport.stop();
+                Tone.Transport.cancel();
+                if (synthRef.current) { synthRef.current.dispose(); synthRef.current = null; }
+            }, []);
+
+            const GW = STEPS * cellW;
+            const GH = rowTops.length > 0 ? rowTops[rowTops.length - 1] + rowHeights[rowHeights.length - 1] : 0;
+
+            return (
+                <div className="w-full mt-8">
+                    <div className="bg-white rounded-2xl shadow-lg border border-slate-100 overflow-hidden">
+                        {/* Header */}
+                        <div className="bg-gradient-to-r from-indigo-600 to-violet-600 px-6 py-4 text-white">
+                            <h2 className="text-xl font-bold flex items-center gap-2">
+                                <i data-lucide="grid-3x3" className="w-5 h-5"></i> メロディーエディター
+                            </h2>
+                            <p className="text-indigo-200 mt-1 text-xs">
+                                8小節（4/4拍子・BPM 120）｜クリックでノート配置・削除、右端ドラッグで長さ調整｜Ctrl+Z で元に戻す
+                            </p>
+                        </div>
+
+                        <div className="p-3 sm:p-4 space-y-3">
+                            {/* Controls */}
+                            <div className="flex items-center gap-2 flex-wrap">
+                                <button
+                                    onClick={playing ? stopPlay : startPlay}
+                                    className={`flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-bold border shadow-sm transition-all ${
+                                        playing
+                                            ? 'bg-red-50 text-red-600 border-red-200 hover:bg-red-100'
+                                            : 'bg-indigo-50 text-indigo-600 border-indigo-200 hover:bg-indigo-100'
+                                    }`}
+                                >
+                                    {playing
+                                        ? <><i data-lucide="square" className="w-4 h-4 fill-current"></i> 停止</>
+                                        : <><i data-lucide="play" className="w-4 h-4 fill-current"></i> 再生</>
+                                    }
+                                </button>
+                                <button
+                                    onClick={() => setRepeat(r => !r)}
+                                    className={`flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm font-bold border shadow-sm transition-all ${
+                                        repeat
+                                            ? 'bg-emerald-50 text-emerald-600 border-emerald-300 ring-1 ring-emerald-300'
+                                            : 'bg-white text-slate-400 border-slate-200 hover:bg-slate-50'
+                                    }`}
+                                    title={repeat ? 'リピート ON' : 'リピート OFF'}
+                                >
+                                    <i data-lucide="repeat" className="w-4 h-4"></i>
+                                </button>
+                                <button
+                                    onClick={() => {
+                                        if (notes.length > 0 && !confirm('すべてのノートを削除します。よろしいですか？\n（元に戻す: Ctrl+Z / Cmd+Z）')) return;
+                                        pushHistory(notes);
+                                        stopPlay();
+                                        setNotes([]);
+                                    }}
+                                    className="flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-bold bg-white text-slate-500 border border-slate-200 hover:bg-slate-50 shadow-sm"
+                                >
+                                    <i data-lucide="trash-2" className="w-3.5 h-3.5"></i> クリア
+                                </button>
+                                <button
+                                    onClick={() => {
+                                        if (notes.length > 0) {
+                                            if (!confirm('現在の旋律がリセットされます。よろしいですか？\n（元に戻す: Ctrl+Z / Cmd+Z）')) return;
+                                        }
+                                        pushHistory(notes);
+                                        stopPlay();
+                                        const newNotes = generateMusicalMelody();
+                                        setNotes(newNotes);
+                                    }}
+                                    className="flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-bold bg-amber-50 text-amber-600 border border-amber-200 hover:bg-amber-100 shadow-sm transition-all"
+                                >
+                                    <i data-lucide="shuffle" className="w-3.5 h-3.5"></i> ランダム
+                                </button>
+                                {scalePresets[selectedScale] && (
+                                    <button
+                                        onClick={() => loadPreset()}
+                                        className="flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-bold bg-violet-50 text-violet-600 border border-violet-200 hover:bg-violet-100 shadow-sm transition-all"
+                                        title={`「${scalePresets[selectedScale].title}」を読み込む`}
+                                    >
+                                        <i data-lucide="music" className="w-3.5 h-3.5"></i> プリセット
+                                    </button>
+                                )}
+                                <button
+                                    onClick={undo}
+                                    disabled={history.length === 0}
+                                    className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm font-bold bg-white text-slate-500 border border-slate-200 hover:bg-slate-50 shadow-sm transition-all disabled:opacity-30 disabled:cursor-not-allowed"
+                                    title="元に戻す (Ctrl+Z)"
+                                >
+                                    <i data-lucide="undo-2" className="w-3.5 h-3.5"></i> 戻す
+                                </button>
+                                <button
+                                    onClick={() => exportMp3()}
+                                    disabled={notes.length === 0 || exporting}
+                                    className="flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-bold bg-teal-50 text-teal-600 border border-teal-200 hover:bg-teal-100 shadow-sm transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+                                >
+                                    <i data-lucide="download" className="w-3.5 h-3.5"></i> {exporting ? '変換中...' : 'MP3'}
+                                </button>
+                                <span className="text-[11px] text-slate-400 ml-auto hidden sm:inline">
+                                    ■ 1/16 &nbsp; ■■ 1/8 &nbsp; ■■■■ 1/4
+                                </span>
+                            </div>
+
+                            {/* 保存スロット */}
+                            <div className="flex items-center gap-2 flex-wrap bg-slate-50 rounded-lg px-3 py-2 border border-slate-100">
+                                <span className="text-[11px] text-slate-400 font-bold mr-1">
+                                    <i data-lucide="save" className="w-3 h-3 inline-block mr-0.5 align-middle"></i> 保存スロット
+                                </span>
+                                {['A', 'B', 'C'].map(id => {
+                                    const has = !!slots[id];
+                                    const flash = savedFlash === id;
+                                    return (
+                                        <div key={id} className="flex items-center gap-0.5">
+                                            {/* 保存ボタン */}
+                                            <button
+                                                onClick={() => saveToSlot(id)}
+                                                disabled={notes.length === 0}
+                                                className={`px-2.5 py-1 rounded-l-md text-xs font-bold border transition-all
+                                                    ${flash
+                                                        ? 'bg-green-500 text-white border-green-600'
+                                                        : notes.length === 0
+                                                            ? 'bg-slate-100 text-slate-300 border-slate-200 cursor-not-allowed'
+                                                            : 'bg-indigo-50 text-indigo-600 border-indigo-200 hover:bg-indigo-100'
+                                                    }`}
+                                                title={`スロット${id}に保存`}
+                                            >
+                                                {flash ? '✓' : id}
+                                            </button>
+                                            {/* 読込ボタン */}
+                                            <button
+                                                onClick={() => loadFromSlot(id)}
+                                                disabled={!has}
+                                                className={`px-2 py-1 text-xs border-y transition-all
+                                                    ${has
+                                                        ? 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'
+                                                        : 'bg-slate-50 text-slate-300 border-slate-200 cursor-not-allowed'
+                                                    }`}
+                                                title={has ? `スロット${id}を読込（${new Date(slots[id].ts).toLocaleString('ja-JP')})` : '空'}
+                                            >
+                                                {has ? '読込' : '空'}
+                                            </button>
+                                            {/* 削除ボタン */}
+                                            <button
+                                                onClick={() => deleteSlot(id)}
+                                                disabled={!has}
+                                                className={`px-1.5 py-1 rounded-r-md text-xs border transition-all
+                                                    ${has
+                                                        ? 'bg-white text-slate-400 border-slate-200 hover:bg-red-50 hover:text-red-500'
+                                                        : 'bg-slate-50 text-slate-200 border-slate-200 cursor-not-allowed'
+                                                    }`}
+                                                title={`スロット${id}を削除`}
+                                            >
+                                                ×
+                                            </button>
+                                        </div>
+                                    );
+                                })}
+                                <span className="text-[10px] text-slate-300 ml-1">自動保存ON</span>
+                            </div>
+
+                            {/* Piano Roll */}
+                            <div ref={containerRef} className="border border-slate-200 rounded-lg select-none overflow-hidden">
+                                {cellW > 0 && (
+                                <div style={{ display: 'flex' }}>
+                                    {/* Pitch labels (sticky left) */}
+                                    <div className="flex-none z-20" style={{ width: LABEL_W }}>
+                                        {/* Corner */}
+                                        <div className="bg-slate-100 border-b border-r border-slate-200" style={{ height: HEADER_H }}></div>
+                                        {/* Labels */}
+                                        {pitches.map((p, i) => {
+                                            const active = isPitchActive(p);
+                                            const h = rowHeights[i];
+                                            return (
+                                                <div
+                                                    key={p}
+                                                    className={`flex items-center justify-end pr-1.5 border-b border-r whitespace-nowrap overflow-hidden
+                                                        ${!active
+                                                            ? 'bg-slate-300 text-slate-400 border-slate-300'
+                                                            : isCNote(p)
+                                                                ? 'bg-blue-50 text-blue-600 font-bold border-blue-200'
+                                                                : isBlackKey(p)
+                                                                    ? 'bg-slate-200 text-slate-500 border-slate-200'
+                                                                    : 'bg-slate-50 text-slate-600 border-slate-100'
+                                                        }`}
+                                                    style={{ height: h, fontSize: active ? 11 : 0, lineHeight: `${h}px` }}
+                                                >
+                                                    {active ? pitchLabel(p) : ''}
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+
+                                    {/* Grid column */}
+                                    <div className="flex-1 overflow-x-auto">
+                                        {/* Beat header */}
+                                        <div className="flex bg-slate-50 border-b border-slate-200" style={{ height: HEADER_H, width: GW }}>
+                                            {Array.from({ length: NUM_BARS }, (_, bar) => (
+                                                <React.Fragment key={bar}>
+                                                    {[0, 1, 2, 3].map(beat => (
+                                                        <div
+                                                            key={`${bar}-${beat}`}
+                                                            className={`text-[11px] font-mono flex items-center pl-1
+                                                                ${beat === 0
+                                                                    ? 'border-l-2 border-slate-400 font-bold text-slate-600'
+                                                                    : 'border-l border-slate-300 text-slate-400'
+                                                                }`}
+                                                            style={{ width: 4 * cellW, height: HEADER_H }}
+                                                        >
+                                                            {beat === 0 ? `${bar + 1}` : ''}
+                                                        </div>
+                                                    ))}
+                                                </React.Fragment>
+                                            ))}
+                                        </div>
+
+                                        {/* Grid body */}
+                                        <div
+                                            ref={gridRef}
+                                            className="relative cursor-crosshair"
+                                            style={{ width: GW, height: GH }}
+                                            onMouseDown={handleGridMouseDown}
+                                        >
+                                            {/* Row backgrounds */}
+                                            {pitches.map((p, i) => (
+                                                <div
+                                                    key={p}
+                                                    className={`absolute w-full border-b pointer-events-none
+                                                        ${!isPitchActive(p)
+                                                            ? 'bg-slate-200/60 border-slate-200'
+                                                            : isCNote(p)
+                                                                ? 'bg-blue-50/40 border-blue-100'
+                                                                : isBlackKey(p)
+                                                                    ? 'bg-slate-100/80 border-slate-100'
+                                                                    : 'bg-white border-slate-50'
+                                                        }`}
+                                                    style={{ top: rowTops[i], height: rowHeights[i] }}
+                                                />
+                                            ))}
+
+                                            {/* Vertical grid lines */}
+                                            {Array.from({ length: STEPS + 1 }, (_, i) => (
+                                                <div
+                                                    key={i}
+                                                    className={`absolute top-0 pointer-events-none
+                                                        ${i % 16 === 0
+                                                            ? 'border-l-2 border-slate-400'
+                                                            : i % 4 === 0
+                                                                ? 'border-l border-slate-300'
+                                                                : 'border-l border-slate-100'
+                                                        }`}
+                                                    style={{ left: i * cellW, height: GH }}
+                                                />
+                                            ))}
+
+                                            {/* Notes */}
+                                            {notes.map(note => {
+                                                const row = pitches.indexOf(note.pitch);
+                                                if (row < 0) return null;
+                                                const rh = rowHeights[row];
+                                                return (
+                                                    <div
+                                                        key={note.id}
+                                                        className="absolute z-10 group"
+                                                        style={{
+                                                            left: note.step * cellW + 1,
+                                                            top: rowTops[row] + 1,
+                                                            width: note.duration * cellW - 1,
+                                                            height: rh - 2,
+                                                        }}
+                                                        onMouseDown={(e) => {
+                                                            e.stopPropagation();
+                                                            pushHistory(notes);
+                                                            setNotes(prev => prev.filter(n => n.id !== note.id));
+                                                        }}
+                                                    >
+                                                        <div className="w-full h-full bg-indigo-500 rounded-sm border border-indigo-600 hover:bg-indigo-400 flex items-center overflow-hidden cursor-pointer transition-colors">
+                                                            {note.duration >= 2 && (
+                                                                <span className="text-[9px] text-white/80 pl-1 truncate pointer-events-none font-bold">
+                                                                    {pitchLabel(note.pitch)}
+                                                                </span>
+                                                            )}
+                                                        </div>
+                                                        {/* Resize handle (right edge) */}
+                                                        <div
+                                                            className="absolute right-0 top-0 w-3 h-full cursor-ew-resize bg-indigo-300 opacity-0 group-hover:opacity-60 hover:!opacity-100 rounded-r-sm transition-opacity"
+                                                            onMouseDown={(e) => {
+                                                                e.stopPropagation();
+                                                                e.preventDefault();
+                                                                pushHistory(notes);
+                                                                setDrag({ noteId: note.id, startX: e.clientX, origDur: note.duration });
+                                                            }}
+                                                        />
+                                                    </div>
+                                                );
+                                            })}
+
+                                            {/* Playback cursor */}
+                                            {cursor >= 0 && (
+                                                <div
+                                                    className="absolute top-0 w-0.5 bg-red-500 z-20 pointer-events-none"
+                                                    style={{ left: cursor * cellW + cellW / 2, height: GH }}
+                                                />
+                                            )}
+                                        </div>
+                                    </div>
+                                </div>
+                                )}
+                            </div>
+
+                            {/* Hint */}
+                            <p className="text-[11px] text-slate-400 leading-relaxed">
+                                グリッドの1マス = 16分音符（8小節分）。ノートを置いたあと、右端をドラッグして長さを変えられます。「戻す」ボタンまたは Ctrl+Z で直前の操作を取り消せます。
+                            </p>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        // --- App ---
+        const App = () => {
+            const [selectedScale, setSelectedScale] = useState('scale1');
+
+            useEffect(() => { lucide.createIcons(); }, [selectedScale]);
+
+            return (
+                <div className="min-h-screen pb-20 bg-slate-50">
+                    <header className="bg-slate-900 text-white pt-10 pb-20 px-4">
+                        <div className="max-w-4xl mx-auto text-center">
+                            <div className="inline-flex items-center gap-2 bg-emerald-500/20 text-emerald-200 px-4 py-1.5 rounded-full text-sm font-bold border border-emerald-500/30 mb-4">
+                                <i data-lucide="music" className="w-4 h-4"></i> 音楽制作ワークショップ教材
+                            </div>
+                            <h1 className="text-3xl md:text-5xl font-bold mb-4 tracking-tight">
+                                メロディーをつくろう！
+                            </h1>
+                            <p className="text-slate-300 text-lg max-w-2xl mx-auto">
+                                5つの音だけを使って、自分だけの旋律をつくって書き出そう
+                            </p>
+                        </div>
+                    </header>
+
+                    <main className="max-w-5xl mx-auto px-4 -mt-10 space-y-8 relative z-10">
+                        <MelodyMaker selectedScale={selectedScale} setSelectedScale={setSelectedScale} />
+                        <MelodyEditor selectedScale={selectedScale} />
+                    </main>
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
